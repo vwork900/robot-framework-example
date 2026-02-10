@@ -13,13 +13,13 @@ A simple search in DuckDuckGo to check that results are displayed is used as exa
 * [venv](<https://packaging.python.org/guides/installing-using-pip-and-virtual-environments/>) (recommended)
 * Chrome and Firefox
 
-# Instalation
+# Installation
 
 Assuming python, pip and venv are installed correctly:
 
 1. Download or clone this repository 
 2. Open a terminal
-3. Go to the project root directory "/selenium-python-example/".
+3. Go to the project root directory (e.g. `robot-framework-example/`).
 4. Create a virtual environment: 
    - (UBUNTU): `python3 -m venv .venv`
    - (WINDOWS): `py -m venv venv`
@@ -35,11 +35,15 @@ Assuming python, pip and venv are installed correctly:
 
 # Configuration
 
-By default, tests will be executed in Chrome (headless mode). Preferences can be changed in "/config/defaults.yaml" file
+By default, tests will be executed in Chrome (headless mode). Preferences can be changed in `config/defaults.yaml`.
 
 # Results
 
-To check the report, open the '/results/report.html' file once the execution has finished.
+To check the report, open the `results/report.html` file once the execution has finished.
+
+# CI/CD
+
+Daily test runs are executed via GitHub Actions (see `.github/workflows/daily-test.yml`). The status badge at the top of this README reflects the latest workflow run.
 
 # Links
    
