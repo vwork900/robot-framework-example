@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - main
-      - develop
+      - new_feature
     paths:
       - 'tests/**'
       - 'resources/**'
@@ -285,7 +285,7 @@ jobs:
     if: |
       always() &&
       needs.robot-tests.result == 'success' &&
-      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop') &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/new_feature') &&
       (github.event_name == 'push' || github.event.inputs.trigger_jenkins == 'true')
     
     steps:
