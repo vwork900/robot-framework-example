@@ -1,36 +1,357 @@
-name: Daily Robot Framework Tests
+name: Robot Framework CI/CD
 
 on:
-  schedule:
-    - cron: '0 6 * * *'
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'tests/**'
+      - 'resources/**'
+      - 'pages/**'
+      - 'config/**'
+      - '**.robot'
+      - '**.py'
+      - 'requirements.txt'
+      - '.github/workflows/**'
+  
+  pull_request:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'tests/**'
+      - 'resources/**'
+      - 'pages/**'
+      - 'config/**'
+      - '**.robot'
+      - '**.py'
+      - 'requirements.txt'
+  
   workflow_dispatch:
+    inputs:
+      test_suite:
+        description: 'Test suite to run (default: all tests)'
+        required: false
+        default: 'tests/'
+        type: string
+      trigger_jenkins:
+        description: 'Trigger Jenkins after tests'
+        required: false
+        default: true
+        type: boolean
+      environment:
+        description: 'Target environment'
+        required: false
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+          - development
 
 jobs:
-  selenium-tests:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-
+  robot-tests:
+    name: Run Robot Framework Tests
+    runs-on: windows-latest
+    timeout-minutes: 30
+    
+    if: github.event.pull_request.draft == false || github.event_name != 'pull_request'
+    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Set up Python
+        with:
+          fetch-depth: 0
+      
+      - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-
+          cache: 'pip'
+      
       - name: Install Google Chrome
         run: |
-          wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-          sudo apt-get update
-          sudo apt-get install -y ./google-chrome-stable_current_amd64.deb
-    
-      - name: Install dependencies
+          choco install googlechrome -y
+          refreshenv
+        shell: powershell
+      
+      - name: Install ChromeDriver
         run: |
-          python -m pip install --upgrade pip
+          choco install chromedriver -y
+          refreshenv
+        shell: powershell
+      
+      - name: Verify Chrome Installation
+        run: |
+          $chromePath = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+          if (Test-Path $chromePath) {
+            & $chromePath --version
+            Write-Host "Chrome installed successfully"
+          } else {
+            Write-Error "Chrome not found at expected path"
+            exit 1
+          }
+        shell: powershell
+      
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
           pip install -r requirements.txt
-
-      - name: Run RF tests
+          pip list | Select-String -Pattern "robotframework|selenium"
+        shell: powershell
+      
+      - name: Validate project structure
         run: |
-          mkdir -p results
-          robot --pythonpath resources -d results tests/
+          Write-Host "Project Structure:"
+          Get-ChildItem
+          
+          Write-Host "`nTests directory:"
+          Get-ChildItem tests\
+          
+          Write-Host "`nResources directory:"
+          Get-ChildItem resources\
+          
+          Write-Host "`nPages directory:"
+          Get-ChildItem pages\
+          
+          Write-Host "`nConfig directory:"
+          Get-ChildItem config\
+        shell: powershell
+      
+      - name: Run Robot Framework Tests
+        env:
+          ENVIRONMENT: ${{ github.event.inputs.environment || 'staging' }}
+        run: |
+          New-Item -ItemType Directory -Force -Path results
+          
+          $testSuite = "${{ github.event.inputs.test_suite }}"
+          if ([string]::IsNullOrEmpty($testSuite)) {
+            $testSuite = "tests\"
+          }
+          
+          robot `
+            --pythonpath .;resources;pages;config `
+            --outputdir results `
+            --variable ENVIRONMENT:$env:ENVIRONMENT `
+            --variable BROWSER:headlesschrome `
+            --loglevel INFO `
+            --consolewidth 120 `
+            --xunit xunit.xml `
+            $testSuite
+        shell: powershell
+        continue-on-error: true
+      
+      - name: Parse Test Results
+        if: always()
+        id: test_results
+        run: |
+          if (Test-Path results\output.xml) {
+            $content = Get-Content results\output.xml -Raw
+            
+            $passedMatch = [regex]::Match($content, 'pass="(\d+)"')
+            $failedMatch = [regex]::Match($content, 'fail="(\d+)"')
+            
+            $passed = if ($passedMatch.Success) { $passedMatch.Groups[1].Value } else { "0" }
+            $failed = if ($failedMatch.Success) { $failedMatch.Groups[1].Value } else { "0" }
+            $total = [int]$passed + [int]$failed
+            
+            echo "passed=$passed" >> $env:GITHUB_OUTPUT
+            echo "failed=$failed" >> $env:GITHUB_OUTPUT
+            echo "total=$total" >> $env:GITHUB_OUTPUT
+            
+            if ($total -gt 0) {
+              $passRate = [math]::Round(([int]$passed / $total) * 100, 1)
+            } else {
+              $passRate = 0.0
+            }
+            echo "pass_rate=$passRate" >> $env:GITHUB_OUTPUT
+            
+            if ([int]$failed -eq 0) {
+              echo "status=success" >> $env:GITHUB_OUTPUT
+              exit 0
+            } else {
+              echo "status=failure" >> $env:GITHUB_OUTPUT
+              exit 1
+            }
+          } else {
+            echo "status=error" >> $env:GITHUB_OUTPUT
+            Write-Error "No output.xml found - tests may have crashed"
+            exit 1
+          }
+        shell: powershell
+      
+      - name: Publish Test Results
+        uses: EnricoMi/publish-unit-test-result-action/windows@v2
+        if: always()
+        with:
+          files: results/xunit.xml
+          check_name: 'Robot Framework Test Results'
+          comment_mode: always
+      
+      - name: Upload Robot Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: robot-results-${{ github.run_number }}-${{ github.sha }}
+          path: |
+            results/
+            !results/**/*.png
+            !results/**/*.jpg
+          retention-days: 30
+      
+      - name: Upload Screenshots
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-screenshots-${{ github.run_number }}
+          path: |
+            results/**/*.png
+            results/**/*.jpg
+          retention-days: 7
+      
+      - name: Generate GitHub Summary
+        if: always()
+        run: |
+          $summary = @"
+          ## Robot Framework Test Results
+          
+          | Metric | Value |
+          |--------|-------|
+          | Passed | ${{ steps.test_results.outputs.passed }} |
+          | Failed | ${{ steps.test_results.outputs.failed }} |
+          | Total | ${{ steps.test_results.outputs.total }} |
+          | Pass Rate | ${{ steps.test_results.outputs.pass_rate }}% |
+          
+          **Branch:** ``${{ github.ref_name }}``
+          **Commit:** ``${{ github.sha }}``
+          **Environment:** ``${{ github.event.inputs.environment || 'staging' }}``
+          
+          "@
+          
+          if ("${{ steps.test_results.outputs.failed }}" -ne "0") {
+            $summary += "`n**Status:** Tests failed"
+          } else {
+            $summary += "`n**Status:** All tests passed"
+          }
+          
+          $summary += "`n`n[View detailed results](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+          
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
+        shell: powershell
+      
+      - name: Comment PR with Test Results
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const passed = '${{ steps.test_results.outputs.passed }}';
+            const failed = '${{ steps.test_results.outputs.failed }}';
+            const total = '${{ steps.test_results.outputs.total }}';
+            const passRate = '${{ steps.test_results.outputs.pass_rate }}';
+            const status = failed === '0' ? 'All tests passed' : `${failed} test(s) failed`;
+            
+            const body = `**Robot Framework Test Results**
+            
+            ${status}
+            
+            | Metric | Value |
+            |--------|-------|
+            | Passed | ${passed} |
+            | Failed | ${failed} |
+            | Total Tests | ${total} |
+            | Pass Rate | ${passRate}% |
+            
+            **Details:**
+            - **Branch:** \`${{ github.head_ref }}\`
+            - **Commit:** \`${{ github.event.pull_request.head.sha }}\`
+            - **Triggered by:** @${{ github.actor }}
+            
+            [View full test report](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            [Download artifacts](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}#artifacts)`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+  
+  trigger-jenkins:
+    name: Trigger Jenkins Pipeline
+    needs: robot-tests
+    runs-on: windows-latest
+    
+    if: |
+      always() &&
+      needs.robot-tests.result == 'success' &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop') &&
+      (github.event_name == 'push' || github.event.inputs.trigger_jenkins == 'true')
+    
+    steps:
+      - name: Trigger Jenkins Build
+        env:
+          JENKINS_URL: ${{ secrets.JENKINS_URL }}
+          JENKINS_USER: ${{ secrets.JENKINS_USER }}
+          JENKINS_TOKEN: ${{ secrets.JENKINS_API_TOKEN }}
+          JENKINS_JOB: ${{ secrets.JENKINS_JOB_NAME }}
+        run: |
+          Write-Host "Triggering Jenkins pipeline..."
+          Write-Host "Job: $env:JENKINS_JOB"
+          Write-Host "Branch: ${{ github.ref_name }}"
+          
+          $credentials = "$env:JENKINS_USER`:$env:JENKINS_TOKEN"
+          $encodedCredentials = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($credentials))
+          
+          $headers = @{
+            "Authorization" = "Basic $encodedCredentials"
+            "Content-Type" = "application/x-www-form-urlencoded"
+          }
+          
+          $body = @{
+            "BRANCH" = "${{ github.ref_name }}"
+            "COMMIT_SHA" = "${{ github.sha }}"
+            "GITHUB_RUN_ID" = "${{ github.run_id }}"
+            "ENVIRONMENT" = "${{ github.event.inputs.environment || 'staging' }}"
+            "TRIGGERED_BY" = "github-actions"
+          }
+          
+          $url = "$env:JENKINS_URL/job/$env:JENKINS_JOB/buildWithParameters"
+          
+          try {
+            $response = Invoke-WebRequest -Uri $url -Method Post -Headers $headers -Body $body -UseBasicParsing
+            
+            if ($response.StatusCode -eq 200 -or $response.StatusCode -eq 201) {
+              Write-Host "Jenkins pipeline triggered successfully (HTTP $($response.StatusCode))"
+              Write-Host "Check status at: $env:JENKINS_URL/job/$env:JENKINS_JOB"
+            } else {
+              Write-Error "Failed to trigger Jenkins (HTTP $($response.StatusCode))"
+              exit 1
+            }
+          } catch {
+            Write-Error "Error triggering Jenkins: $_"
+            exit 1
+          }
+        shell: powershell
+      
+      - name: Wait for Jenkins Job
+        run: |
+          Write-Host "Waiting for Jenkins job to start..."
+          Start-Sleep -Seconds 15
+          Write-Host "Jenkins job should be running now"
+        shell: powershell
+      
+      - name: Add Jenkins Link to Summary
+        run: |
+          $summary = @"
+          ## Jenkins Pipeline Triggered
+          
+          **Job:** ${{ secrets.JENKINS_JOB_NAME }}
+          **Branch:** ${{ github.ref_name }}
+          **Environment:** ${{ github.event.inputs.environment || 'staging' }}
+          
+          [View Jenkins Job](${{ secrets.JENKINS_URL }}/job/${{ secrets.JENKINS_JOB_NAME }})
+          "@
+          
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
+        shell: powershell
